@@ -17,6 +17,19 @@ static inline int eof_comm_skip_leadin(double lead_len, int strict,
 }
 
 /*
+ * A show block immediately before a commercial, shorter than
+ * delete_block_after_commercial. That is the break ident: the cut should
+ * start there, so the ident and the first ad frames are inside the break.
+ * A real show scene is longer than the limit and stays.
+ */
+static inline int short_show_before_commercial(double lead_len, double lead_score,
+                                               double threshold, double max_lead)
+{
+    return max_lead > 0.0 && lead_len > 0.0 && lead_len < max_lead
+           && lead_score < threshold;
+}
+
+/*
  * delete_show_before_first_commercial used to require start_block==1, so two
  * leading show blocks (previous programme + sting) were kept. Treat any
  * leading show as junk when the first commercial starts before a show-length

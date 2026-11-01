@@ -1,7 +1,6 @@
-# Verified stills, user clock (20:01 = 1201s). IPTV Sky Sci-Fi H.264 1080p 25fps.
-# Break 1/2 include the return ident; show is back at 24:03 and 40:24.
-# Break 3 is credits from 47:22 (Wright/Cooper EP card) through EOF padding.
-# Do not treat 9:13 or 46:55 as pods.
-1201.00	1442.68	0
-2181.84	2423.68	0
-2842.00	3547.08	0
+# Comskip sky.ini on Stargate Atlantis S01E01 Rising.ts.
+# Pod starts include the short ident block before the first ad.
+# Ends: show back near 24:03 and 40:24. Credits from 47:22 through EOF.
+1198.20	1442.68	0
+2179.20	2423.68	0
+2842.48	3547.08	0

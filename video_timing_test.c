@@ -53,6 +53,13 @@ int main(void)
     expect_int("no-preroll-midbreak", leading_junk_before_first_comm(1, 480.0, 720.0, 125.0, 840.0), 0);
     expect_int("no-preroll-block0", leading_junk_before_first_comm(0, 58.0, 83.0, 125.0, 840.0), 0);
 
+    expect_int("ident-before", short_show_before_commercial(2.60, 1.00, 1.05, 7.0), 1);
+    expect_int("ident-quiet", short_show_before_commercial(2.60, 0.50, 1.05, 7.0), 1);
+    expect_int("show-scene", short_show_before_commercial(942.0, 0.06, 1.05, 7.0), 0);
+    expect_int("already-commercial", short_show_before_commercial(2.60, 15.0, 1.05, 7.0), 0);
+    expect_int("ident-disabled", short_show_before_commercial(2.60, 1.00, 1.05, 0.0), 0);
+    expect_int("ident-at-limit", short_show_before_commercial(7.0, 1.00, 1.05, 7.0), 0);
+
     if (fails) {
         fprintf(stderr, "%d failed\n", fails);
         return 1;

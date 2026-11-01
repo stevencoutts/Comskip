@@ -7340,6 +7340,27 @@ bool OutputBlocks(void)
                     cblock[i].more |= C_H5;
                 }
             }
+            for (k = 0; k <= commercial_count; k++)
+            {
+                i = commercial[k].start_block - 1;
+                if (i < 0)
+                    continue;
+                if (k > 0 && i <= commercial[k - 1].end_block)
+                    continue;
+                if (!short_show_before_commercial(cblock[i].length, cblock[i].score,
+                                                  threshold,
+                                                  (double)delete_block_after_commercial))
+                    continue;
+                Debug(3, "H5 Deleting cblock %i of %.2f seconds because it is short and comes before a commercial.\n",
+                      i, cblock[i].length);
+                commercial[k].start_frame = cblock[i].f_start;
+                commercial[k].length = F2L(commercial[k].end_frame, commercial[k].start_frame);
+                commercial[k].start_block = i;
+                cblock[i].iscommercial = true;
+                cblock[i].cause |= C_H5;
+                cblock[i].score = 99.99;
+                cblock[i].more |= C_H5;
+            }
         }
 
         if (commercial_count > -1 &&
