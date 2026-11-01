@@ -12,8 +12,16 @@
 /*.dSYM
 /ccextratorwin/.dirstamp
 
+# Local test media
+/Test Video/
+/video_timing_test
+/test-suite.log
+/*.log
+/*.trs
+
 # Autotools stuff
 .deps
+/test-driver
 Makefile
 Makefile.in
 aclocal.m4

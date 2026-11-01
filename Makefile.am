@@ -4,9 +4,12 @@ bin_PROGRAMS = comskip
 if BUILD_GUI
     bin_PROGRAMS += comskip-gui
 endif
-check_PROGRAMS = votest
+check_PROGRAMS = votest video_timing_test
+TESTS = video_timing_test
+video_timing_test_SOURCES = video_timing_test.c
 
 base_sources = comskip.c comskip.h mpeg2dec.c platform.c platform.h video_out_dx.c vo.h \
+    video_timing.h \
     ccextratorwin/608.c ccextratorwin/608.h \
     ccextratorwin/ccextractor.c ccextratorwin/ccextractor.h \
     ccextratorwin/encoding.c \
@@ -46,3 +49,4 @@ endif
 comskip_CFLAGS = $(DEFAULT_CFLAGS)
 comskip_gui_CFLAGS = $(DEFAULT_CFLAGS)
 votest_CFLAGS = $(DEFAULT_CFLAGS)
+video_timing_test_CFLAGS = $(DEFAULT_CFLAGS)
