@@ -33,6 +33,7 @@
 #endif
 
 #include "comskip.h"
+#include "video_comm_trim.h"
 
 
 // Define detection methods
@@ -7551,6 +7552,77 @@ bool OutputBlocks(void)
             cblock[i].score = 99.99;
             cblock[i].more |= C_H5;
             i++;
+        }
+    }
+
+    if (delete_show_after_last_commercial &&
+            commercial_count > -1 &&
+            commercial[commercial_count].end_block == block_count - 1)
+    {
+        i = commercial[commercial_count].start_block;
+        while (i < commercial[commercial_count].end_block)
+        {
+            int prev = i - 1;
+            long cut;
+
+            while (prev > 0 && cblock[prev].length < 10.0 && cblock[prev].score < global_threshold)
+                prev--;
+            if (prev < 0 ||
+                    !eof_comm_skip_leadin(cblock[i].length, cblock[i].strict,
+                                          cblock[prev].length, min_commercialbreak,
+                                          min_show_segment_length))
+                break;
+
+            cut = 0;
+            if (framearray)
+            {
+                long k, keep_until;
+                int prev_b;
+
+                keep_until = cblock[i].f_start + (long)(10.0 * fps);
+                if (keep_until < cblock[i].f_end && cblock[i].f_end <= frame_count)
+                {
+                    prev_b = frame[cblock[i].f_start].brightness;
+                    for (k = cblock[i].f_start + 1; k <= cblock[i].f_end; k++)
+                    {
+                        if (k > keep_until && frame[k].brightness > prev_b &&
+                                abs(frame[k].brightness - prev_b) > brightness_jump)
+                        {
+                            cut = k;
+                            break;
+                        }
+                        if (frame[k].brightness > 5)
+                            prev_b = frame[k].brightness;
+                    }
+                }
+            }
+            if (cut == 0)
+            {
+                long tail = cblock[i].f_end - (long)(5.0 * fps);
+                long keep = cblock[i].f_start + (long)(10.0 * fps);
+
+                if (tail > keep)
+                    cut = tail;
+            }
+            if (cut > 0)
+            {
+                Debug(3, "H5 Moving EOF commercial start from %li to %li in lead-in cblock %i.\n",
+                      commercial[commercial_count].start_frame, cut, i);
+                commercial[commercial_count].start_frame = cut;
+                commercial[commercial_count].length = F2L(commercial[commercial_count].end_frame, cut);
+                break;
+            }
+
+            Debug(3, "H5 Skipping lead-in cblock %i of %.2fs before EOF commercial.\n",
+                  i, cblock[i].length);
+            cblock[i].score = 0.5;
+            cblock[i].iscommercial = false;
+            cblock[i].less |= C_H5;
+            i++;
+            commercial[commercial_count].start_block = i;
+            commercial[commercial_count].start_frame = cblock[i].f_start;
+            commercial[commercial_count].length = F2L(commercial[commercial_count].end_frame,
+                                                       commercial[commercial_count].start_frame);
         }
     }
 

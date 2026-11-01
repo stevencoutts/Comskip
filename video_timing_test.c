@@ -2,6 +2,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "video_timing.h"
+#include "video_luma.h"
+#include "video_comm_trim.h"
 
 static int fails;
 
@@ -9,6 +11,14 @@ static void expect_near(const char *name, double got, double want)
 {
     if (fabs(got - want) > 1e-9) {
         fprintf(stderr, "FAIL %s: got %.10f want %.10f\n", name, got, want);
+        fails++;
+    }
+}
+
+static void expect_int(const char *name, int got, int want)
+{
+    if (got != want) {
+        fprintf(stderr, "FAIL %s: got %d want %d\n", name, got, want);
         fails++;
     }
 }
@@ -26,6 +36,17 @@ int main(void)
     /* Missing r_frame_rate must not invent field ticks. */
     expect_near("no-r", video_tick_duration(0.04, 0.0), 0.04);
     expect_near("zero-delay", video_tick_duration(0.0, 50.0), 0.0);
+
+    expect_int("8bit", video_luma_needs_8bit(8, 0), 0);
+    expect_int("10bit", video_luma_needs_8bit(10, 0), 1);
+    expect_int("12bit", video_luma_needs_8bit(12, 0), 1);
+    expect_int("hw-10bit", video_luma_needs_8bit(10, 1), 0);
+    expect_int("unknown", video_luma_needs_8bit(0, 0), 0);
+
+    expect_int("eof-skip", eof_comm_skip_leadin(16.44, 0, 161.0, 20.0, 125.0), 1);
+    expect_int("eof-strict", eof_comm_skip_leadin(16.44, 2, 161.0, 20.0, 125.0), 0);
+    expect_int("eof-long-lead", eof_comm_skip_leadin(30.0, 0, 161.0, 20.0, 125.0), 0);
+    expect_int("eof-no-show", eof_comm_skip_leadin(16.44, 0, 12.0, 20.0, 125.0), 0);
 
     if (fails) {
         fprintf(stderr, "%d failed\n", fails);

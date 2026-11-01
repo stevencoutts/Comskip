@@ -1,0 +1,7 @@
+# Verified stills, user clock (20:01 = 1201s). IPTV Sky Sci-Fi H.264 1080p 25fps.
+# Break 1/2 include the return ident; show is back at 24:03 and 40:24.
+# Break 3 is credits from 47:22 (Wright/Cooper EP card) through EOF padding.
+# Do not treat 9:13 or 46:55 as pods.
+1201.00	1442.68	0
+2181.84	2423.68	0
+2842.00	3547.08	0

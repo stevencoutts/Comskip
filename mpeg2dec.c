@@ -30,6 +30,7 @@
 #endif
 #include <argtable2.h>
 #include "video_timing.h"
+#include "video_luma.h"
 #define SELFTEST
 
 int pass = 0;
@@ -146,6 +147,40 @@ typedef struct VideoState
 
 VideoState      *is;
 
+static int convert_frame_to_8bit_y(VideoState *vs)
+{
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(vs->pFrame->format);
+    int hw = desc && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL);
+    int depth = desc ? desc->comp[0].depth : 0;
+    AVFrame *newframe;
+
+    if (!video_luma_needs_8bit(depth, hw))
+        return 0;
+
+    vs->img_convert_ctx = sws_getCachedContext(vs->img_convert_ctx,
+                                               vs->pFrame->width, vs->pFrame->height, vs->pFrame->format,
+                                               vs->pFrame->width, vs->pFrame->height, AV_PIX_FMT_YUV420P,
+                                               SWS_POINT, NULL, NULL, NULL);
+    if (!vs->img_convert_ctx)
+        return -1;
+
+    newframe = av_frame_alloc();
+    if (!newframe)
+        return -1;
+    av_frame_copy_props(newframe, vs->pFrame);
+    newframe->format = AV_PIX_FMT_YUV420P;
+    newframe->width = vs->pFrame->width;
+    newframe->height = vs->pFrame->height;
+    if (av_frame_get_buffer(newframe, 0) < 0) {
+        av_frame_free(&newframe);
+        return -1;
+    }
+    sws_scale(vs->img_convert_ctx, (const uint8_t * const *)vs->pFrame->data, vs->pFrame->linesize,
+              0, vs->pFrame->height, newframe->data, newframe->linesize);
+    av_frame_unref(vs->pFrame);
+    vs->pFrame = newframe;
+    return 0;
+}
 
 AVDictionary *myoptions = NULL;
 
@@ -1291,19 +1326,6 @@ static int    prev_strange_framenum = 0;
     while ((len1 = avcodec_receive_frame(is->dec_ctx, is->pFrame)) >= 0)
     {
         frameFinished = 1;
-        // convert to 8bit
-        if (is->pFrame->format == AV_PIX_FMT_YUV420P10LE) {
-            is->img_convert_ctx = sws_getCachedContext(is->img_convert_ctx, is->pFrame->width, is->pFrame->height, is->pFrame->format, is->pFrame->width, is->pFrame->height, AV_PIX_FMT_YUV420P, SWS_POINT, NULL, NULL, NULL);
-            AVFrame *newframe = av_frame_alloc();
-            av_frame_copy_props(newframe, is->pFrame);
-            newframe->format = AV_PIX_FMT_YUV420P;
-            newframe->width = is->pFrame->width;
-            newframe->height = is->pFrame->height;
-            av_frame_get_buffer(newframe, 0);
-            sws_scale(is->img_convert_ctx, (const uint8_t * const *)is->pFrame->data, is->pFrame->linesize, 0, is->pFrame->height, newframe->data, newframe->linesize);
-            av_frame_unref(is->pFrame);
-            is->pFrame = newframe;
-        }
 
         if (video_rate_ok(is->dec_ctx->framerate.num, is->dec_ctx->framerate.den))
         {
@@ -1488,6 +1510,8 @@ static int    prev_strange_framenum = 0;
         }
         ist->hwaccel_retrieved_pix_fmt = is->pFrame->format;
 #endif
+        if (convert_frame_to_8bit_y(is) < 0)
+            goto quit;
 
 
 

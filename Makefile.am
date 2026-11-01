@@ -10,6 +10,8 @@ video_timing_test_SOURCES = video_timing_test.c
 
 base_sources = comskip.c comskip.h mpeg2dec.c platform.c platform.h video_out_dx.c vo.h \
     video_timing.h \
+    video_luma.h \
+    video_comm_trim.h \
     ccextratorwin/608.c ccextratorwin/608.h \
     ccextratorwin/ccextractor.c ccextratorwin/ccextractor.h \
     ccextratorwin/encoding.c \
