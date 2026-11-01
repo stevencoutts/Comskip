@@ -48,6 +48,11 @@ int main(void)
     expect_int("eof-long-lead", eof_comm_skip_leadin(30.0, 0, 161.0, 20.0, 125.0), 0);
     expect_int("eof-no-show", eof_comm_skip_leadin(16.44, 0, 12.0, 20.0, 125.0), 0);
 
+    expect_int("preroll", leading_junk_before_first_comm(2, 58.0, 83.0, 125.0, 840.0), 1);
+    expect_int("no-preroll-late", leading_junk_before_first_comm(19, 1201.0, 1443.0, 125.0, 840.0), 0);
+    expect_int("no-preroll-midbreak", leading_junk_before_first_comm(1, 480.0, 720.0, 125.0, 840.0), 0);
+    expect_int("no-preroll-block0", leading_junk_before_first_comm(0, 58.0, 83.0, 125.0, 840.0), 0);
+
     if (fails) {
         fprintf(stderr, "%d failed\n", fails);
         return 1;
