@@ -8457,14 +8457,11 @@ void LoadIniFile()
         printf("No INI file found in current directory.  Searching PATH...\n");
         FindIniFile();
         if (*inifilename != '\0')
-        {
-            printf("INI file found at %s\n", inifilename);
             ini_file = myfopen(inifilename, "r");
-        }
+        if (ini_file)
+            printf("INI file found at %s\n", inifilename);
         else
-        {
             printf("No INI file found in PATH...\n");
-        }
     }
 
     if (ini_file)

@@ -2280,7 +2280,7 @@ int main (int argc, char ** argv)
         }
         strncpy(HomeDir, ptr, len);
 
-        ptr = strrchr(HomeDir,'\\');
+        ptr = strrchr(HomeDir, PATH_SEPARATOR);
         if (!ptr || ptr - HomeDir == 0)
         {
             HomeDir[0] = '.';
