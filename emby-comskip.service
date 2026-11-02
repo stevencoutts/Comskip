@@ -1,0 +1,17 @@
+[Unit]
+Description=Cut commercials from new Emby recordings
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=stevec
+Group=stevec
+WorkingDirectory=/var/tmp
+ExecStart=/usr/local/bin/emby-comskip-worker
+Restart=always
+RestartSec=3
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

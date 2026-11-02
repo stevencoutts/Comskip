@@ -1,0 +1,767 @@
+#!/usr/bin/env python3
+"""Cut commercials out of a new Emby recording and swap in an mp4.
+
+The original .ts is moved to /media/Recordings-originals, mirroring its
+path under /media/Recordings, so Emby does not show two copies.
+
+Emby runs inside a container whose C library is older than this host, so the
+post-process hook only queues a path. This process runs on the host, where
+comskip is installed. It accepts only files under the recordings directory.
+
+Comskip only writes the cut list. This process builds the mp4. Video is
+copied. Where pieces are joined, audio is re-encoded onto the video clock
+so a player that counts samples stays with the picture.
+"""
+
+import errno
+import glob
+import json
+import os
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+import traceback
+import urllib.error
+import urllib.request
+
+RECORDINGS = "/media/Recordings"
+ORIGINALS = "/media/Recordings-originals"
+CONTAINER_ROOT = "/mnt/recordings"
+COMSKIP = "/usr/local/bin/comskip"
+INI = "/usr/local/share/comskip/sky.ini"
+QUEUE = "/home/stevec/Docker/emby/comskip/queue"
+LOG_PATH = "/home/stevec/Docker/emby/logs/comskip.log"
+WORK_ROOT = "/var/tmp/emby-comskip"
+FFMPEG = "/usr/bin/ffmpeg"
+FFPROBE = "/usr/bin/ffprobe"
+AUTH_DB = "/home/stevec/Docker/emby/data/authentication.db"
+LIBRARY_DB = "/home/stevec/Docker/emby/data/library.db"
+EMBY = "http://127.0.0.1:8096"
+RECORDINGS_ITEM = "67100"
+
+_log_lock = None
+
+
+def log(message):
+    line = time.strftime("%Y-%m-%dT%H:%M:%S") + " " + message + "\n"
+    os.makedirs(os.path.dirname(LOG_PATH), exist_ok=True)
+    with open(LOG_PATH, "a", encoding="utf-8") as handle:
+        handle.write(line)
+
+
+def to_host(path):
+    path = path.strip().strip('"').strip("'")
+    if path.startswith(CONTAINER_ROOT + "/") or path == CONTAINER_ROOT:
+        path = RECORDINGS + path[len(CONTAINER_ROOT):]
+    return path
+
+
+def to_container(host_path):
+    if host_path == RECORDINGS:
+        return CONTAINER_ROOT
+    if host_path.startswith(RECORDINGS + os.sep):
+        return CONTAINER_ROOT + host_path[len(RECORDINGS):]
+    raise ValueError("path is outside the recordings directory")
+
+
+def under_recordings(path):
+    real = os.path.realpath(path)
+    root = os.path.realpath(RECORDINGS)
+    if real != root and not real.startswith(root + os.sep):
+        raise ValueError("refusing path outside recordings: " + path)
+    return real
+
+
+def archive_original(host):
+    """Move a finished recording out of the library, keeping the file."""
+    root = os.path.realpath(RECORDINGS)
+    real = os.path.realpath(host)
+    rel = os.path.relpath(real, root)
+    if rel == ".." or rel.startswith(".." + os.sep) or os.path.isabs(rel):
+        raise RuntimeError("refusing to archive " + host)
+    dest = os.path.join(ORIGINALS, rel)
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    originals_root = os.path.realpath(ORIGINALS)
+    parent = os.path.realpath(os.path.dirname(dest))
+    if parent != originals_root and not parent.startswith(originals_root + os.sep):
+        raise RuntimeError("archive path left originals: " + dest)
+    if os.path.lexists(dest):
+        if not os.path.isfile(dest):
+            raise RuntimeError("archive path exists and is not a file: " + dest)
+        log("kept existing original " + dest)
+        if not os.path.samefile(real, dest):
+            os.remove(real)
+        return dest
+    try:
+        os.replace(real, dest)
+    except OSError as exc:
+        if exc.errno != errno.EXDEV:
+            raise
+        shutil.move(real, dest)
+    if os.path.exists(real) or not os.path.isfile(dest):
+        raise RuntimeError("original was not moved to " + dest)
+    log("moved original " + real + " to " + dest)
+    return dest
+
+
+def run(cmd, **kwargs):
+    log("run " + " ".join(cmd))
+    return subprocess.run(cmd, check=True, **kwargs)
+
+
+def probe(path):
+    raw = subprocess.check_output(
+        [
+            FFPROBE, "-v", "error",
+            "-show_entries", "format=duration,size",
+            "-show_entries", "stream=codec_type,codec_name",
+            "-of", "json", path,
+        ],
+        text=True,
+    )
+    data = json.loads(raw)
+    streams = data.get("streams") or []
+    types = {stream.get("codec_type") for stream in streams}
+    video = next((stream.get("codec_name") for stream in streams if stream.get("codec_type") == "video"), None)
+    fmt = data.get("format") or {}
+    duration = float(fmt.get("duration") or 0)
+    size = int(fmt.get("size") or 0)
+    return ("video" in types and "audio" in types), duration, video, size
+
+
+def parse_edl(path):
+    """Return cut ranges in file order. Do not sort across a timestamp reset."""
+    cuts = []
+    with open(path, encoding="utf-8", errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line or line[0] in "#;":
+                continue
+            parts = line.split()
+            if len(parts) < 2:
+                continue
+            start, end = float(parts[0]), float(parts[1])
+            action = int(float(parts[2])) if len(parts) > 2 else 0
+            if action != 0 or end <= start:
+                continue
+            cuts.append((start, end))
+    return cuts
+
+
+def merge_cuts(cuts):
+    merged = []
+    for start, end in sorted(cuts):
+        if end <= start:
+            continue
+        if not merged or start > merged[-1][1]:
+            merged.append((start, end))
+        else:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    return merged
+
+
+def keep_ranges(cuts, duration):
+    keeps = []
+    cursor = 0.0
+    for start, end in cuts:
+        start = max(0.0, start)
+        end = min(duration, end)
+        if start > cursor + 0.05:
+            keeps.append((cursor, start, False))
+        cursor = max(cursor, end)
+    if duration - cursor > 0.05:
+        keeps.append((cursor, duration, True))
+    return [(start, end, eof) for start, end, eof in keeps if end - start >= 0.2]
+
+
+def assign_cuts(cuts, pieces):
+    """Place each EDL range on the piece whose playback clock contains it.
+
+    Times are used as ffmpeg -ss on that piece. A backwards step in the EDL
+    belongs to the next piece, because the recording's timestamps restarted.
+    A range that runs off the end of a piece continues at the next piece.
+    """
+    durations = [duration for _path, duration in pieces]
+    if len(pieces) == 1:
+        return [merge_cuts(cuts)]
+    assigned = [[] for _ in pieces]
+    piece = 0
+    last_end = None
+    for start, end in cuts:
+        original_end = end
+        if last_end is not None and start < last_end - 0.5:
+            piece = min(piece + 1, len(pieces) - 1)
+            while piece < len(pieces) - 1 and end > durations[piece] + 2.0:
+                piece += 1
+        while piece < len(pieces) - 1 and start < durations[piece] and end > durations[piece] + 0.05:
+            assigned[piece].append((start, durations[piece]))
+            end -= durations[piece]
+            start = 0.0
+            piece += 1
+        while piece < len(pieces) - 1 and start >= durations[piece] - 0.05:
+            start -= durations[piece]
+            end -= durations[piece]
+            piece += 1
+        if piece < len(pieces) and end - start > 0.05:
+            assigned[piece].append((max(0.0, start), end))
+        last_end = original_end
+    return [merge_cuts(group) for group in assigned]
+
+
+def discontinuity_offsets(path):
+    """Byte positions of backwards video timestamp jumps, on a keyframe."""
+    proc = subprocess.Popen(
+        [
+            FFPROBE, "-v", "error", "-select_streams", "v:0",
+            "-show_packets", "-show_entries", "packet=pts_time,pos,flags",
+            "-of", "compact=p=0:nk=1", path,
+        ],
+        stdout=subprocess.PIPE, text=True,
+    )
+    previous = None
+    pending = None
+    offsets = []
+    for line in proc.stdout:
+        parts = line.rstrip("\n").split("|")
+        if len(parts) < 3:
+            continue
+        pts_text, pos_text, flags = parts[0], parts[1], parts[2]
+        if pts_text in ("", "N/A") or pos_text in ("", "N/A"):
+            continue
+        pts = float(pts_text)
+        pos = int(float(pos_text))
+        keyframe = "K" in flags
+        if pending is not None:
+            if keyframe:
+                offsets.append(pos)
+                pending = None
+            previous = pts
+            continue
+        if previous is not None and pts < previous - 0.5:
+            if keyframe:
+                offsets.append(pos)
+            else:
+                pending = pos
+        previous = pts
+    if proc.wait() != 0:
+        raise RuntimeError("ffprobe failed while scanning timestamps")
+    if pending is not None:
+        log("timestamp jump had no keyframe; splitting at the jump")
+        offsets.append(pending)
+    return offsets
+
+
+def split_transport(src, offsets, work):
+    size = os.path.getsize(src)
+    points = []
+    for pos in offsets:
+        aligned = pos - (pos % 188)
+        if aligned < 188 * 50 or aligned > size - 188 * 50:
+            log(f"ignoring timestamp jump at byte {pos}")
+            continue
+        if points and aligned - points[-1] < 188 * 50:
+            continue
+        points.append(aligned)
+        log(f"split transport at byte {aligned}")
+    if not points:
+        return []
+    bounds = [0] + points + [size]
+    parts = []
+    for index in range(len(bounds) - 1):
+        start, end = bounds[index], bounds[index + 1]
+        start_packet = start // 188
+        end_packet = end // 188
+        if end_packet <= start_packet:
+            continue
+        part = os.path.join(work, f"piece{index}.ts")
+        run([
+            "dd", f"if={src}", f"of={part}", "bs=188",
+            f"skip={start_packet}", f"count={end_packet - start_packet}",
+            "status=none",
+        ])
+        parts.append(part)
+    return parts
+
+
+def remux_piece(src, dest):
+    """Copy one half so its timestamps are a normal clock, not a reset."""
+    run([
+        FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+        "-i", src, "-map", "0:v:0", "-map", "0:a:0",
+        "-c", "copy", "-copyts",
+        "-muxpreload", "0", "-muxdelay", "0", dest,
+    ])
+
+
+def source_pieces(src, work):
+    _ok, duration, _video, _size = probe(src)
+    offsets = discontinuity_offsets(src)
+    if not offsets:
+        return [(src, duration)], False
+    parts = split_transport(src, offsets, work)
+    if len(parts) < 2:
+        log("timestamp jump found but the file was not split")
+        return [(src, duration)], True
+    pieces = []
+    for index, part in enumerate(parts):
+        dest = os.path.join(work, f"piece{index}.mp4")
+        remux_piece(part, dest)
+        good, piece_duration, _codec, _size = probe(dest)
+        if not good or piece_duration <= 0:
+            raise RuntimeError("timestamp piece has no video and audio")
+        log(f"piece {index} duration={piece_duration:.2f}")
+        pieces.append((dest, piece_duration))
+    return pieces, True
+
+
+def stream_duration(path, selector):
+    raw = subprocess.check_output(
+        [
+            FFPROBE, "-v", "error", "-select_streams", selector,
+            "-show_entries", "stream=duration",
+            "-of", "default=nw=1:nk=1", path,
+        ],
+        text=True,
+    ).strip()
+    try:
+        value = float(raw.splitlines()[0])
+    except (ValueError, IndexError):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
+def max_audio_gap(path):
+    proc = subprocess.Popen(
+        [
+            FFPROBE, "-v", "error", "-select_streams", "a:0",
+            "-show_packets", "-show_entries", "packet=pts_time",
+            "-of", "compact=p=0:nk=1", path,
+        ],
+        stdout=subprocess.PIPE, text=True,
+    )
+    previous = None
+    worst = 0.0
+    for line in proc.stdout:
+        line = line.strip()
+        if not line or line == "N/A":
+            continue
+        pts = float(line.split("|")[0])
+        if previous is not None:
+            worst = max(worst, pts - previous)
+        previous = pts
+    if proc.wait() != 0:
+        raise RuntimeError("ffprobe failed while reading audio timestamps")
+    return worst
+
+
+def cut_segment(src, start, end, dest, until_eof):
+    # -ss and -to before -i are the playback clock. Do not add start_time.
+    cmd = [FFMPEG, "-y", "-hide_banner", "-loglevel", "error"]
+    if start > 0.001:
+        cmd += ["-ss", f"{start:.3f}"]
+    if not until_eof:
+        cmd += ["-to", f"{end:.3f}"]
+    cmd += [
+        "-i", src, "-map", "0:v:0", "-map", "0:a:0", "-c", "copy",
+        "-avoid_negative_ts", "make_zero",
+        "-muxpreload", "0", "-muxdelay", "0", dest,
+    ]
+    run(cmd)
+
+
+def concat_segments(segments, dest, hevc, lock_audio):
+    if len(segments) == 1 and not lock_audio:
+        cmd = [
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+            "-i", segments[0], "-map", "0:v:0", "-map", "0:a:0",
+            "-c", "copy", "-movflags", "+faststart",
+        ]
+        if hevc:
+            cmd += ["-tag:v", "hvc1"]
+        cmd.append(dest)
+        run(cmd)
+        return
+
+    if len(segments) == 1:
+        joined = segments[0]
+    else:
+        listing = dest + ".concat.txt"
+        with open(listing, "w", encoding="utf-8") as handle:
+            handle.write("ffconcat version 1.0\n")
+            for index, segment in enumerate(segments):
+                handle.write("file '" + segment.replace("'", r"'\''") + "'\n")
+                if index == len(segments) - 1:
+                    continue
+                duration = stream_duration(segment, "v:0")
+                if duration is None:
+                    duration = probe(segment)[1]
+                handle.write(f"duration {duration:.3f}\n")
+        joined = dest + ".joined.mp4"
+        run([
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "concat", "-safe", "0", "-i", listing,
+            "-map", "0:v:0", "-map", "0:a:0", "-c", "copy",
+            "-muxpreload", "0", "-muxdelay", "0", joined,
+        ])
+    # A stream-copy join leaves a longer hole in the audio clock than in
+    # the video. Those holes are stretched packet times, not samples, so a
+    # player that counts samples runs early. Re-encode the audio to AAC-LC
+    # and fill or trim it to the video clock. The picture stays a copy.
+    log("lock audio to video clock")
+    cmd = [
+        FFMPEG, "-y", "-hide_banner", "-loglevel", "error", "-i", joined,
+        "-map", "0:v:0", "-map", "0:a:0",
+        "-c:v", "copy",
+        "-c:a", "aac", "-profile:a", "aac_low", "-b:a", "128k",
+        "-ar", "48000", "-ac", "2",
+        "-af", "aresample=async=1:first_pts=0",
+        "-muxpreload", "0", "-muxdelay", "0",
+        "-movflags", "+faststart",
+    ]
+    if hevc:
+        cmd += ["-tag:v", "hvc1"]
+    cmd.append(dest)
+    run(cmd)
+
+
+def mux(src, edl_path, dest, work):
+    ok, _duration, video, _size = probe(src)
+    if not ok or _duration <= 0:
+        raise RuntimeError("recording has no video and audio")
+    cuts = parse_edl(edl_path)
+    log("edl " + " ".join(f"{start:.2f}-{end:.2f}" for start, end in cuts) if cuts else "edl empty")
+    pieces, jumped = source_pieces(src, work)
+    assigned = assign_cuts(cuts, pieces)
+    segments = []
+    for piece_index, ((piece, piece_duration), piece_cuts) in enumerate(zip(pieces, assigned)):
+        keeps = keep_ranges(piece_cuts, piece_duration)
+        for index, (start, end, eof) in enumerate(keeps):
+            segment = os.path.join(work, f"seg{piece_index}_{index}.mp4")
+            log(f"keep piece {piece_index} {start:.2f}-{end:.2f}")
+            cut_segment(piece, start, end, segment, eof)
+            good, seg_duration, _codec, _size = probe(segment)
+            if not good or seg_duration <= 0:
+                raise RuntimeError("cut segment has no video and audio")
+            segments.append(segment)
+    if not segments:
+        raise RuntimeError("cut list removed the entire recording")
+    concat_segments(segments, dest, video == "hevc", len(segments) > 1 or jumped)
+    good, out_duration, video_out, size = probe(dest)
+    if not good or out_duration <= 1 or size <= 0:
+        raise RuntimeError("muxed mp4 has no video and audio")
+    if video == "hevc" and video_out != "hevc":
+        raise RuntimeError("muxed mp4 lost the hevc video")
+    return out_duration, size
+
+
+def wait_until_stable(path):
+    previous = -1
+    for _ in range(60):
+        size = os.path.getsize(path)
+        if size > 0 and size == previous:
+            return
+        previous = size
+        time.sleep(2)
+    raise RuntimeError("recording size was still changing")
+
+
+def admin_token():
+    uri = "file:" + AUTH_DB + "?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=10)
+    try:
+        row = con.execute(
+            "SELECT AccessToken FROM Tokens_2 WHERE UserId=1 AND IsActive=1 "
+            "ORDER BY DateLastActivityInt DESC LIMIT 1"
+        ).fetchone()
+    finally:
+        con.close()
+    return row[0] if row else None
+
+
+def emby_post(path, payload, token):
+    data = json.dumps(payload).encode("utf-8")
+    request = urllib.request.Request(
+        EMBY + path, data=data, method="POST",
+        headers={"X-Emby-Token": token, "Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=60) as response:
+        response.read()
+        return response.status
+
+
+def folder_id(container_path):
+    uri = "file:" + LIBRARY_DB + "?mode=ro"
+    con = sqlite3.connect(uri, uri=True, timeout=10)
+    try:
+        row = con.execute(
+            "SELECT Id FROM MediaItems WHERE Path=? LIMIT 1", (container_path,)
+        ).fetchone()
+    finally:
+        con.close()
+    return str(row[0]) if row else None
+
+
+def refresh(ts_container, mp4_container):
+    token = admin_token()
+    if not token:
+        log("refresh skipped: no active admin session")
+        return
+    parent = os.path.dirname(mp4_container)
+    try:
+        status = emby_post("/emby/Library/Media/Updated", {
+            "Updates": [
+                {"Path": ts_container, "UpdateType": "Deleted"},
+                {"Path": mp4_container, "UpdateType": "Created"},
+                {"Path": parent, "UpdateType": "Modified"},
+            ]
+        }, token)
+        log(f"library update {status} {mp4_container}")
+    except urllib.error.HTTPError as exc:
+        log(f"library update HTTP {exc.code}")
+    item = folder_id(parent) or RECORDINGS_ITEM
+    query = ("/emby/Items/" + item + "/Refresh?Recursive=true"
+             "&MetadataRefreshMode=Default&ImageRefreshMode=ValidationOnly"
+             "&ReplaceAllMetadata=false&ReplaceAllImages=false")
+    try:
+        status = emby_post(query, {}, token)
+        log(f"item refresh {status} id {item}")
+    except urllib.error.HTTPError as exc:
+        log(f"item refresh HTTP {exc.code} id {item}")
+
+
+def process(raw_path):
+    host = under_recordings(to_host(raw_path))
+    if not os.path.isfile(host):
+        mp4 = os.path.splitext(host)[0] + ".mp4"
+        if host.lower().endswith(".ts") and os.path.isfile(mp4):
+            good, _duration, _video, _size = probe(mp4)
+            if good:
+                log("already swapped " + mp4)
+                return 0
+        log("missing " + host)
+        return 1
+    if host.lower().endswith(".mp4"):
+        log("already mp4 " + host)
+        return 0
+    if not host.lower().endswith(".ts"):
+        log("ignored " + host)
+        return 0
+
+    final = os.path.splitext(host)[0] + ".mp4"
+    partial = final + ".partial"
+    if os.path.isfile(final):
+        good, _duration, _video, _size = probe(final)
+        if good:
+            archive_original(host)
+            log("mp4 already complete " + final)
+            refresh(to_container(host), to_container(final))
+            return 0
+        os.remove(final)
+    if os.path.exists(partial):
+        os.remove(partial)
+
+    wait_until_stable(host)
+    work = os.path.join(WORK_ROOT, "job-" + str(os.getpid()) + "-" + str(time.time_ns()))
+    os.makedirs(work, exist_ok=True)
+    try:
+        output = os.path.join(work, "comskip.out")
+        with open(output, "w", encoding="utf-8", errors="replace") as handle:
+            run([COMSKIP, "--ini", INI, "--output", work, host, work],
+                stdout=handle, stderr=subprocess.STDOUT)
+        edls = glob.glob(os.path.join(work, "*.edl"))
+        if len(edls) != 1:
+            raise RuntimeError("comskip did not write one edl")
+        local_mp4 = os.path.join(work, "out.mp4")
+        duration, size = mux(host, edls[0], local_mp4, work)
+        shutil.copyfile(local_mp4, partial)
+        if os.path.getsize(local_mp4) != os.path.getsize(partial):
+            raise RuntimeError("copy to the library folder was short")
+        good, _duration, _video, _size = probe(partial)
+        if not good:
+            raise RuntimeError("copied mp4 has no video and audio")
+        os.replace(partial, final)
+        good, duration, video, size = probe(final)
+        if not good:
+            os.remove(final)
+            raise RuntimeError("final mp4 has no video and audio")
+        archive_original(host)
+        for sidecar in glob.glob(os.path.splitext(host)[0] + ".*"):
+            if sidecar == final or sidecar == partial:
+                continue
+            if sidecar.lower().endswith((".edl", ".txt", ".log", ".logo.txt")):
+                try:
+                    os.remove(sidecar)
+                except OSError as exc:
+                    log("leftover " + sidecar + " " + str(exc))
+        log(f"swapped {final} duration={duration:.1f}s size={size} codec={video}")
+        container_ts = to_container(host)
+        container_mp4 = to_container(final)
+        refresh(container_ts, container_mp4)
+        # Emby imports the recording after the hook returns, and its library
+        # monitor waits 90s. Refresh again after both of those.
+        now = time.time()
+        PENDING.append((now + 15, container_ts, container_mp4))
+        PENDING.append((now + 120, container_ts, container_mp4))
+        return 0
+    finally:
+        if os.path.exists(partial):
+            os.remove(partial)
+        shutil.rmtree(work, ignore_errors=True)
+
+
+PENDING = []
+
+
+def drain_refreshes():
+    now = time.time()
+    due = [item for item in PENDING if item[0] <= now]
+    for item in due:
+        PENDING.remove(item)
+        _when, ts_path, mp4_path = item
+        try:
+            refresh(ts_path, mp4_path)
+            log("follow-up refresh " + mp4_path)
+        except Exception:
+            log("second refresh failed\n" + traceback.format_exc())
+
+
+def finish_job(job_path, rc):
+    stem = job_path[:-8] if job_path.endswith(".running") else job_path[:-4]
+    marker = stem + (".ok" if rc == 0 else ".fail")
+    with open(marker, "w", encoding="utf-8") as handle:
+        handle.write(str(rc) + "\n")
+    if os.path.exists(job_path):
+        os.remove(job_path)
+
+
+def reclaim_running():
+    for running in glob.glob(os.path.join(QUEUE, "*.running")):
+        job = running[:-8] + ".job"
+        os.replace(running, job)
+        log("requeued " + os.path.basename(job))
+
+
+def serve():
+    os.makedirs(QUEUE, exist_ok=True)
+    os.makedirs(WORK_ROOT, exist_ok=True)
+    version = "unknown"
+    version_path = "/usr/local/share/comskip/VERSION"
+    if os.path.isfile(version_path):
+        version = open(version_path, encoding="utf-8").read().strip()
+    log("worker started comskip " + version)
+    reclaim_running()
+    while True:
+        drain_refreshes()
+        jobs = sorted(glob.glob(os.path.join(QUEUE, "*.job")))
+        if not jobs:
+            time.sleep(1)
+            continue
+        running = jobs[0][:-4] + ".running"
+        os.replace(jobs[0], running)
+        raw = open(running, encoding="utf-8").read().strip()
+        log("job " + raw)
+        try:
+            rc = process(raw)
+        except Exception:
+            log("failed " + raw + "\n" + traceback.format_exc())
+            rc = 1
+        finish_job(running, rc)
+        log("done rc=" + str(rc) + " " + raw)
+
+
+def self_test():
+    root = os.path.join(WORK_ROOT, "self-test")
+    shutil.rmtree(root, ignore_errors=True)
+    os.makedirs(root)
+    src = os.path.join(root, "sample.ts")
+    run([
+        FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi", "-i", "testsrc=size=320x180:rate=25:duration=20",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=20",
+        "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-g", "25",
+        "-c:a", "aac", "-f", "mpegts", src,
+    ])
+    edl = os.path.join(root, "sample.edl")
+    with open(edl, "w", encoding="utf-8") as handle:
+        handle.write("5.00\t10.00\t0\n")
+    dest = os.path.join(root, "out.mp4")
+    duration, _size = mux(src, edl, dest, root)
+    if not (13.5 <= duration <= 16.5):
+        raise SystemExit("self-test duration " + str(duration))
+    _ok, _duration, codec, _size = probe(dest)
+    if codec != "h264":
+        raise SystemExit("video was not copied: " + str(codec))
+    gap = max_audio_gap(dest)
+    print(f"self-test audio gap {gap:.3f}s")
+    if gap > 0.08:
+        raise SystemExit(f"audio clock hole {gap:.3f}s")
+
+    jump = os.path.join(root, "jump")
+    os.makedirs(jump)
+    first = os.path.join(jump, "a.ts")
+    second = os.path.join(jump, "b.ts")
+    jump_src = os.path.join(jump, "jump.ts")
+    for path, seconds, tone in ((first, 6, 440), (second, 4, 880)):
+        run([
+            FFMPEG, "-y", "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"testsrc=size=160x120:rate=25:duration={seconds}",
+            "-f", "lavfi", "-i", f"sine=frequency={tone}:duration={seconds}",
+            "-map", "0:v:0", "-map", "1:a:0", "-c:v", "libx264", "-g", "25",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "mpegts", path,
+        ])
+    with open(jump_src, "wb") as output:
+        for path in (first, second):
+            with open(path, "rb") as handle:
+                shutil.copyfileobj(handle, output)
+    if not discontinuity_offsets(jump_src):
+        raise SystemExit("self-test missed the timestamp jump")
+    jump_edl = os.path.join(jump, "jump.edl")
+    with open(jump_edl, "w", encoding="utf-8") as handle:
+        handle.write("1.00\t2.00\t0\n0.50\t1.50\t0\n")
+    jump_dest = os.path.join(jump, "out.mp4")
+    jump_duration, _size = mux(jump_src, jump_edl, jump_dest, jump)
+    # 6s piece loses about 1s and the 4s piece loses about 1s. Stream copy
+    # ends on keyframes, so a 1s GOP keeps some of a cut that misses them.
+    if not (6.5 <= jump_duration <= 11.0):
+        raise SystemExit("jump duration " + str(jump_duration))
+    jump_gap = max_audio_gap(jump_dest)
+    print(f"self-test jump audio gap {jump_gap:.3f}s duration {jump_duration:.2f}s")
+    if jump_gap > 0.08:
+        raise SystemExit(f"jump audio clock hole {jump_gap:.3f}s")
+
+    comskip_out = os.path.join(root, "comskip.out")
+    with open(comskip_out, "w", encoding="utf-8") as handle:
+        run([COMSKIP, "--ini", INI, "--output", root, src, root],
+            stdout=handle, stderr=subprocess.STDOUT)
+    if not glob.glob(os.path.join(root, "*.edl")):
+        raise SystemExit("comskip wrote no edl")
+    shutil.rmtree(root, ignore_errors=True)
+    print("self-test ok")
+
+
+def main(argv):
+    if len(argv) == 2 and argv[1] == "--self-test":
+        self_test()
+        return 0
+    if len(argv) == 3 and argv[1] == "--once":
+        try:
+            return process(argv[2])
+        except Exception:
+            log("failed " + argv[2] + "\n" + traceback.format_exc())
+            return 1
+    if len(argv) != 1:
+        print("usage: emby-comskip-worker [--self-test | --once PATH]", file=sys.stderr)
+        return 2
+    serve()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main(sys.argv))
+    except KeyboardInterrupt:
+        sys.exit(0)
