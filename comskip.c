@@ -7498,6 +7498,64 @@ bool OutputBlocks(void)
 
         }
 
+        /*
+         * The tail of a break can score as a short show, and the dark
+         * return of the programme as another commercial. A strict ad
+         * length on that second run is a real pod and stays.
+         */
+        for (k = 0; k < commercial_count; k++)
+        {
+            int gap_b = commercial[k].end_block + 1;
+            int gap_e = commercial[k + 1].start_block - 1;
+            int m, st;
+            double gap = 0.0;
+            double show_after = 0.0;
+
+            if (gap_b > gap_e)
+                continue;
+            for (m = gap_b; m <= gap_e; m++)
+                gap += cblock[m].length;
+            st = 0;
+            for (m = commercial[k + 1].start_block; m <= commercial[k + 1].end_block; m++)
+                if (cblock[m].cause & C_STRICT)
+                    st = 2;
+            for (m = commercial[k + 1].end_block + 1; m < block_count; m++)
+            {
+                if (k + 2 <= commercial_count && m >= commercial[k + 2].start_block)
+                    break;
+                if (cblock[m].score > threshold)
+                    break;
+                show_after += cblock[m].length;
+            }
+            if (!break_tail_then_false_return(commercial[k].length, gap,
+                                              commercial[k + 1].length, show_after, st,
+                                              min_show_segment_length, min_commercialbreak))
+                continue;
+            Debug(3, "H5 Break tail cblock %i-%.0fs, show resumes at cblock %i.\n",
+                  gap_b, gap, commercial[k + 1].start_block);
+            commercial[k].end_block = gap_e;
+            commercial[k].end_frame = cblock[gap_e].f_end;
+            commercial[k].length = F2L(commercial[k].end_frame, commercial[k].start_frame);
+            for (m = gap_b; m <= gap_e; m++)
+            {
+                cblock[m].score = 99.99;
+                cblock[m].iscommercial = true;
+                cblock[m].cause |= C_H5;
+                cblock[m].more |= C_H5;
+            }
+            for (m = commercial[k + 1].start_block; m <= commercial[k + 1].end_block; m++)
+            {
+                cblock[m].score = 0.5;
+                cblock[m].iscommercial = false;
+                cblock[m].less |= C_H5;
+            }
+            for (m = k + 1; m < commercial_count; m++)
+                commercial[m] = commercial[m + 1];
+            commercial_count--;
+            deleted = true;
+            k--;
+        }
+
     }
 
 
@@ -7897,6 +7955,105 @@ bool OutputBlocks(void)
                 deleted = true;
                 break;
             }
+        }
+    }
+
+    /*
+     * Credits can score as the opening of a commercial, with the next
+     * episode scored as the show that follows. The opening block is a
+     * held picture, not a cut-heavy pod. Cut from the bright card after
+     * that hold through to EOF.
+     */
+    if (framearray && block_count > 0 && fps > 0.0 && commercial_count >= 0)
+    {
+        for (k = 0; k <= commercial_count; k++)
+        {
+            int after = commercial[k].end_block + 1;
+            int next = k + 1;
+            int until = (next <= commercial_count) ? commercial[next].start_block : block_count;
+            int m;
+            int opens_still;
+            double show_after = 0.0;
+            double tail_len = 0.0;
+            long scan_from, scan_to, frm, cut = 0;
+            int margin = brightness_jump / 2;
+
+            for (m = after; m < until; m++)
+            {
+                if (cblock[m].score > threshold)
+                    break;
+                show_after += cblock[m].length;
+            }
+            if (m < until)
+                continue;
+            if (next <= commercial_count)
+            {
+                if (next != commercial_count)
+                    continue;
+                tail_len = commercial[next].length;
+            }
+            opens_still = cblock[commercial[k].start_block].brightness < avg_brightness;
+            if (!credits_then_next_show(commercial[k].length, opens_still, show_after,
+                                        tail_len, min_show_segment_length,
+                                        min_commercialbreak))
+                continue;
+            scan_from = commercial[k].start_frame;
+            scan_to = commercial[k].end_frame;
+            for (frm = scan_from + (long)(2.0 * fps); frm < scan_to; frm++)
+            {
+                long p;
+                long prev_from = frm - (long)(2.0 * fps);
+                long next_to = frm + (long)(0.5 * fps);
+                long sum = 0;
+                int next_min, prev_avg;
+
+                if (prev_from < 1)
+                    continue;
+                if (next_to > scan_to)
+                    break;
+                for (p = prev_from; p < frm; p++)
+                    sum += frame[p].brightness;
+                prev_avg = (int)(sum / (frm - prev_from));
+                if (prev_avg >= max_brightness)
+                    continue;
+                next_min = frame[frm].brightness;
+                for (p = frm; p < next_to; p++)
+                    if (frame[p].brightness < next_min)
+                        next_min = frame[p].brightness;
+                if (!bright_break_after_dim(frame[frm].brightness, prev_avg, next_min, margin))
+                    continue;
+                cut = frm;
+                while (cut > prev_from && frame[cut - 1].brightness > prev_avg + margin / 2)
+                    cut--;
+                break;
+            }
+            if (cut <= scan_from)
+                continue;
+            Debug(3, "Credits end at frame %li (%.2fs); next programme to EOF.\n",
+                  cut, (double)cut / fps);
+            commercial[k].start_frame = cut;
+            for (m = commercial[k].start_block; m <= commercial[k].end_block; m++)
+            {
+                if (cblock[m].f_end >= cut)
+                {
+                    commercial[k].start_block = m;
+                    break;
+                }
+            }
+            commercial[k].end_block = block_count - 1;
+            commercial[k].end_frame = cblock[block_count - 1].f_end;
+            commercial[k].length = F2L(commercial[k].end_frame, cut);
+            for (m = commercial[k].start_block; m < block_count; m++)
+            {
+                cblock[m].score = 99.99;
+                cblock[m].iscommercial = true;
+                cblock[m].cause |= C_H5;
+                cblock[m].more |= C_H5;
+            }
+            if (next <= commercial_count)
+                commercial_count = k;
+            deleted = true;
+            break;
         }
     }
 

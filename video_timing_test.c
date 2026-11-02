@@ -100,6 +100,21 @@ int main(void)
     expect_int("junction-flash", bright_break_after_dim(176, 30, 40, 100), 0);
     expect_int("junction-show", bright_break_after_dim(90, 70, 85, 100), 0);
 
+    /* Break tail scored as show, and the dark return scored as a short pod. */
+    expect_int("tail-bbt", break_tail_then_false_return(352.84, 65.12, 120.60, 346.56, 1, 125.0, 20.0), 1);
+    expect_int("tail-real-second", break_tail_then_false_return(352.84, 65.12, 180.0, 346.56, 1, 125.0, 20.0), 0);
+    expect_int("tail-strict", break_tail_then_false_return(352.84, 65.12, 120.60, 346.56, 2, 125.0, 20.0), 0);
+    expect_int("tail-long-gap", break_tail_then_false_return(244.0, 469.0, 90.0, 400.0, 0, 125.0, 20.0), 0);
+    expect_int("tail-blip", break_tail_then_false_return(8.0, 40.0, 60.0, 400.0, 0, 125.0, 20.0), 0);
+
+    /* Credits then the next episode. A cut-heavy pod, Stargate's EOF, and a
+     * long following break are not that shape. */
+    expect_int("next-bbt", credits_then_next_show(261.80, 1, 562.0, 3.60, 125.0, 20.0), 1);
+    expect_int("next-no-tail", credits_then_next_show(261.80, 1, 562.0, 0.0, 125.0, 20.0), 1);
+    expect_int("next-cutty", credits_then_next_show(323.0, 0, 1128.0, 0.0, 125.0, 20.0), 0);
+    expect_int("next-stargate", credits_then_next_show(704.60, 1, 0.0, 0.0, 125.0, 20.0), 0);
+    expect_int("next-another-break", credits_then_next_show(244.0, 1, 469.0, 244.0, 125.0, 20.0), 0);
+
     expect_near("span-pod", commercial_span_seconds(223.00 - 894.04, 348.40), 348.40);
     expect_near("span-glitch", commercial_span_seconds(255.68 - 550.72, -295.64), 255.68 - 550.72);
     expect_near("span-positive", commercial_span_seconds(326.04, 326.04), 326.04);

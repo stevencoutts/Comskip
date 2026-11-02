@@ -139,4 +139,36 @@ static inline int bright_break_after_dim(int now, int prev_avg, int next_min, in
     return margin > 0 && now > prev_avg + margin && next_min > prev_avg + margin / 2;
 }
 
+/*
+ * A real break, then a show shorter than a show segment, then another
+ * commercial shorter than a show segment, then a real show. The short
+ * show is the rest of the break (the spots that did not score). The far
+ * commercial is the show coming back, unless it is a strict ad length.
+ */
+static inline int break_tail_then_false_return(double break_len, double gap,
+                                               double false_comm, double show_after,
+                                               int false_strict, double min_show,
+                                               double min_break)
+{
+    return break_len >= min_break
+           && gap > 0.0 && gap < min_show
+           && false_comm > 0.0 && false_comm < min_show
+           && show_after > min_show
+           && false_strict < 2;
+}
+
+/*
+ * A commercial that opens on a held picture, then a show through to EOF
+ * (or a short tail only). The hold is the credits; the show after it is
+ * the next programme. A cut-heavy pod is the ads themselves and is not.
+ */
+static inline int credits_then_next_show(double comm_len, int opens_still,
+                                        double show_after, double tail_len,
+                                        double min_show, double min_comm)
+{
+    return opens_still && comm_len >= min_comm
+           && show_after > min_show
+           && tail_len >= 0.0 && tail_len < min_comm;
+}
+
 #endif
