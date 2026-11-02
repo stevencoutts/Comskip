@@ -6123,10 +6123,11 @@ void WeighBlocks(void)
     /*
      * A show edited into 30s pieces scores as a string of spots. After the
      * programme has started, a run with no aspect change and at most one
-     * black cut, quieter than the recording, is still the show. Real
-     * breaks are louder, change aspect, or cut on black more than once.
-     * A run just after a real break is left for the tail rule. The
-     * opening run is left for the preamble rules.
+     * black cut, whose median block is quieter than the recording, is
+     * still the show. A real break is louder in the middle even when a
+     * quiet spot pulls the mean down. Real breaks also change aspect or
+     * cut on black more than once. A run just after a real break is left
+     * for the tail rule. The opening run is left for the preamble rules.
      */
     for (i = 0; i < block_count; )
     {
@@ -6136,12 +6137,13 @@ void WeighBlocks(void)
         int black_cuts = 0;
         int after_real_break = 0;
         int eof_tail = 0;
-        double vol_sum = 0.0;
         double run_len = 0.0;
         double gap = 0.0;
+        double vols[MAX_BLOCKS];
         int n = 0;
         int k;
         int g;
+        int a;
 
         if (cblock[i].score <= global_threshold)
         {
@@ -6162,9 +6164,21 @@ void WeighBlocks(void)
                 has_aspect = 1;
             if (cblock[k].cause & (C_b | C_u))
                 black_cuts++;
-            vol_sum += cblock[k].volume;
+            if (n < MAX_BLOCKS)
+                vols[n] = cblock[k].volume;
             run_len += cblock[k].length;
             n++;
+        }
+        for (a = 1; a < n && a < MAX_BLOCKS; a++)
+        {
+            double v = vols[a];
+            int b = a;
+            while (b > 0 && vols[b - 1] > v)
+            {
+                vols[b] = vols[b - 1];
+                b--;
+            }
+            vols[b] = v;
         }
         if (run_end == block_count && run_len > 0.0 && run_len < min_commercialbreak)
             eof_tail = 1;
@@ -6172,12 +6186,12 @@ void WeighBlocks(void)
             gap += cblock[g].length;
         if (g >= 0 && gap > 0.0 && gap < min_show_segment_length)
             after_real_break = 1;
-        if (n > 0 && quiet_show_run(vol_sum / n, (double)avg_volume, has_aspect,
+        if (n > 0 && quiet_show_run(vols[n / 2], (double)avg_volume, has_aspect,
                                     seen_show, black_cuts >= 2, after_real_break,
                                     eof_tail))
         {
-            Debug(3, "Quiet run blocks %i-%i (vol %.0f < %ld) is the show.\n",
-                  i, run_end - 1, vol_sum / n, avg_volume);
+            Debug(3, "Quiet run blocks %i-%i (median vol %.0f < %ld) is the show.\n",
+                  i, run_end - 1, vols[n / 2], avg_volume);
             for (k = i; k < run_end; k++)
                 cblock[k].score = 0.5;
         }
@@ -7534,17 +7548,28 @@ bool OutputBlocks(void)
         }
 
         if (commercial_count > -1 &&
-                commercial[commercial_count].end_block < block_count - 1 &&
-                F2L(cblock[block_count-1].f_end, cblock[commercial[commercial_count].end_block].f_end) < min_show_segment_length / 2.0 )
+                commercial[commercial_count].end_block < block_count - 1)
         {
-            commercial[commercial_count].end_block = block_count-1;
-            commercial[commercial_count].end_frame = cblock[block_count-1].f_end/* + (cblock[i + 1].bframe_count / 2)*/;
-            commercial[commercial_count].length = F2L(commercial[commercial_count].end_frame, commercial[commercial_count].start_frame);
-            Debug(3, "H5 Deleting cblock %i of %i seconds because it comes after the last commercial and its too short.\n",
-                  block_count-1, (int)cblock[block_count-1].length);
-            cblock[block_count-1].cause |= C_H5;
-            cblock[block_count-1].score = 99.99;
-            cblock[block_count-1].more |= C_H5;
+            double tail_pts = F2L(cblock[block_count-1].f_end, cblock[commercial[commercial_count].end_block].f_end);
+            double tail_frames = 0.0;
+
+            /* A backwards PTS jump makes the clock from here to EOF look
+             * short while the frames still hold the rest of the episode. */
+            if (fps > 0.0)
+                tail_frames = (cblock[block_count-1].f_end - cblock[commercial[commercial_count].end_block].f_end) / fps;
+            if (tail_frames > tail_pts)
+                tail_pts = tail_frames;
+            if (tail_pts < min_show_segment_length / 2.0)
+            {
+                commercial[commercial_count].end_block = block_count-1;
+                commercial[commercial_count].end_frame = cblock[block_count-1].f_end/* + (cblock[i + 1].bframe_count / 2)*/;
+                commercial[commercial_count].length = F2L(commercial[commercial_count].end_frame, commercial[commercial_count].start_frame);
+                Debug(3, "H5 Deleting cblock %i of %i seconds because it comes after the last commercial and its too short.\n",
+                      block_count-1, (int)cblock[block_count-1].length);
+                cblock[block_count-1].cause |= C_H5;
+                cblock[block_count-1].score = 99.99;
+                cblock[block_count-1].more |= C_H5;
+            }
         }
 
         if (commercial_count > -1 &&

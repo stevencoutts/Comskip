@@ -98,13 +98,14 @@ static inline int long_pod_between_shows(double len, double before, double after
 }
 
 /*
- * After the programme has started, a run with no aspect change that is
- * quieter than the recording is the show sliced into spot-length pieces.
- * Real breaks are louder than the file, change aspect, or cut on black
- * more than once. The opening is not passed here. A run sitting just
- * after a real break is the dark return of the programme; the tail rule
- * owns that. A short run that reaches EOF is the tail after the next
- * programme; the credits rule owns that.
+ * After the programme has started, a run with no aspect change whose
+ * median block is quieter than the recording is the show sliced into
+ * spot-length pieces. The median, not the mean: one quiet spot must not
+ * pull a real break under the file. Real breaks are louder in the middle,
+ * change aspect, or cut on black more than once. The opening is not
+ * passed here. A run sitting just after a real break is the dark return
+ * of the programme; the tail rule owns that. A short run that reaches
+ * EOF is the tail after the next programme; the credits rule owns that.
  */
 static inline int quiet_show_run(double run_vol, double file_vol, int has_aspect,
                                  int after_show, int has_ad_cuts, int after_real_break,

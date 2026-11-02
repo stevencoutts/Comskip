@@ -79,8 +79,8 @@ int main(void)
     expect_int("pod-break2", long_pod_between_shows(326.04, 374.92, 857.64, 125.0, 600.0), 1);
     expect_int("pod-break3", long_pod_between_shows(272.88, 857.64, 1127.92, 125.0, 600.0), 1);
     expect_int("shed-similar", long_pod_between_shows(309.52, 315.28, 354.40, 125.0, 600.0), 0);
-    expect_int("quiet-shed", quiet_show_run(1845.0, 1895.0, 0, 1, 0, 0, 0), 1);
-    expect_int("quiet-one-fade", quiet_show_run(1838.0, 1895.0, 0, 1, 0, 0, 0), 1);
+    expect_int("quiet-shed", quiet_show_run(1765.0, 1895.0, 0, 1, 0, 0, 0), 1);
+    expect_int("ad-median", quiet_show_run(1910.0, 1895.0, 0, 1, 0, 0, 0), 0);
     expect_int("quiet-opening", quiet_show_run(2000.0, 1895.0, 0, 0, 0, 0, 0), 0);
     expect_int("loud-pod", quiet_show_run(1296.0, 1122.0, 0, 1, 0, 0, 0), 0);
     expect_int("loud-bbt", quiet_show_run(1030.0, 974.0, 0, 1, 0, 0, 0), 0);
