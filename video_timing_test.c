@@ -75,8 +75,19 @@ int main(void)
                 924.04 - 598.00);
 
     /* HIGNFY pods sit between longer shows. Stargate/Dog House blocks do not. */
+    expect_int("pod-break1", long_pod_between_shows(348.40, 811.48, 374.92, 125.0, 600.0), 1);
     expect_int("pod-break2", long_pod_between_shows(326.04, 374.92, 857.64, 125.0, 600.0), 1);
     expect_int("pod-break3", long_pod_between_shows(272.88, 857.64, 1127.92, 125.0, 600.0), 1);
+    expect_int("shed-similar", long_pod_between_shows(309.52, 315.28, 354.40, 125.0, 600.0), 0);
+    expect_int("quiet-shed", quiet_show_run(1845.0, 1895.0, 0, 1, 0, 0, 0), 1);
+    expect_int("quiet-one-fade", quiet_show_run(1838.0, 1895.0, 0, 1, 0, 0, 0), 1);
+    expect_int("quiet-opening", quiet_show_run(2000.0, 1895.0, 0, 0, 0, 0, 0), 0);
+    expect_int("loud-pod", quiet_show_run(1296.0, 1122.0, 0, 1, 0, 0, 0), 0);
+    expect_int("loud-bbt", quiet_show_run(1030.0, 974.0, 0, 1, 0, 0, 0), 0);
+    expect_int("aspect-run", quiet_show_run(1500.0, 1969.0, 1, 1, 0, 0, 0), 0);
+    expect_int("black-pod", quiet_show_run(954.0, 974.0, 0, 1, 1, 0, 0), 0);
+    expect_int("after-break", quiet_show_run(825.0, 974.0, 0, 1, 0, 1, 0), 0);
+    expect_int("eof-tail", quiet_show_run(869.0, 974.0, 0, 1, 0, 0, 1), 0);
     expect_int("show-between-pods", long_pod_between_shows(374.92, 326.04, 857.64, 125.0, 600.0), 0);
     expect_int("eof-show", long_pod_between_shows(1127.92, 857.64, 0.0, 125.0, 600.0), 0);
     expect_int("stargate-mid", long_pod_between_shows(264.96, 469.56, 225.92, 125.0, 600.0), 0);

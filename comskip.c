@@ -6119,6 +6119,70 @@ void WeighBlocks(void)
               i, cblock[i].length, before_len, after_len);
         cblock[i].score = global_threshold + 1.0;
     }
+
+    /*
+     * A show edited into 30s pieces scores as a string of spots. After the
+     * programme has started, a run with no aspect change and at most one
+     * black cut, quieter than the recording, is still the show. Real
+     * breaks are louder, change aspect, or cut on black more than once.
+     * A run just after a real break is left for the tail rule. The
+     * opening run is left for the preamble rules.
+     */
+    for (i = 0; i < block_count; )
+    {
+        int run_end = i;
+        int seen_show = 0;
+        int has_aspect = 0;
+        int black_cuts = 0;
+        int after_real_break = 0;
+        int eof_tail = 0;
+        double vol_sum = 0.0;
+        double run_len = 0.0;
+        double gap = 0.0;
+        int n = 0;
+        int k;
+        int g;
+
+        if (cblock[i].score <= global_threshold)
+        {
+            i++;
+            continue;
+        }
+        while (run_end < block_count && cblock[run_end].score > global_threshold)
+            run_end++;
+        for (k = 0; k < i; k++)
+        {
+            if (cblock[k].score <= global_threshold
+                    && cblock[k].length >= min_show_segment_length)
+                seen_show = 1;
+        }
+        for (k = i; k < run_end; k++)
+        {
+            if (cblock[k].cause & (C_a | C_AR))
+                has_aspect = 1;
+            if (cblock[k].cause & (C_b | C_u))
+                black_cuts++;
+            vol_sum += cblock[k].volume;
+            run_len += cblock[k].length;
+            n++;
+        }
+        if (run_end == block_count && run_len > 0.0 && run_len < min_commercialbreak)
+            eof_tail = 1;
+        for (g = i - 1; g >= 0 && cblock[g].score <= global_threshold; g--)
+            gap += cblock[g].length;
+        if (g >= 0 && gap > 0.0 && gap < min_show_segment_length)
+            after_real_break = 1;
+        if (n > 0 && quiet_show_run(vol_sum / n, (double)avg_volume, has_aspect,
+                                    seen_show, black_cuts >= 2, after_real_break,
+                                    eof_tail))
+        {
+            Debug(3, "Quiet run blocks %i-%i (vol %.0f < %ld) is the show.\n",
+                  i, run_end - 1, vol_sum / n, avg_volume);
+            for (k = i; k < run_end; k++)
+                cblock[k].score = 0.5;
+        }
+        i = run_end;
+    }
     /*
 
     	if (!(disable_heuristics & (1 << (1 - 1)))) {
@@ -7992,6 +8056,10 @@ bool OutputBlocks(void)
                     continue;
                 tail_len = commercial[next].length;
             }
+            /* The opening advert is also a held picture followed by the
+             * show. Credits are in the end-padding window. */
+            if (commercial[k].start_frame < before_end)
+                continue;
             opens_still = cblock[commercial[k].start_block].brightness < avg_brightness;
             if (!credits_then_next_show(commercial[k].length, opens_still, show_after,
                                         tail_len, min_show_segment_length,
