@@ -106,13 +106,47 @@ static inline int long_pod_between_shows(double len, double before, double after
  * passed here. A run sitting just after a real break is the dark return
  * of the programme; the tail rule owns that. A short run that reaches
  * EOF is the tail after the next programme; the credits rule owns that.
+ * A run in the end-padding window with a show after it is the end break
+ * and the next programme; the tail rule owns that too.
  */
 static inline int quiet_show_run(double run_vol, double file_vol, int has_aspect,
                                  int after_show, int has_ad_cuts, int after_real_break,
-                                 int eof_tail)
+                                 int eof_tail, int end_break)
 {
     return after_show && !has_aspect && !has_ad_cuts && !after_real_break
-           && !eof_tail && file_vol > 0.0 && run_vol > 0.0 && run_vol < file_vol;
+           && !eof_tail && !end_break
+           && file_vol > 0.0 && run_vol > 0.0 && run_vol < file_vol;
+}
+
+/*
+ * The end break's first cut can sit after the credits. The credits are a
+ * near-black hold glued to the end of a moving show block. Search that
+ * tail only when the cut is still the first frame of the break and the
+ * break is in the end-padding window. A still show, a short block, or a
+ * cut already moved off the block edge is not this shape.
+ */
+static inline int credits_glued_to_show(int at_block_edge, int in_end_window,
+                                        int show_block, int show_bright,
+                                        int avg_bright, double show_len,
+                                        double min_show)
+{
+    return at_block_edge && in_end_window && show_block
+           && show_len > min_show
+           && avg_bright > 0 && show_bright > avg_bright / 2;
+}
+
+/*
+ * The picture drops from the show into a near-black hold and stays there.
+ * That hold is the credits. A one-frame flash and a cut between two
+ * bright pictures are not.
+ */
+static inline int dim_hold_after_bright(int now, int prev_avg, int next_max,
+                                        int black, int margin)
+{
+    return black > 0 && margin > 0
+           && prev_avg > black + margin
+           && now < black
+           && next_max < black;
 }
 
 /*

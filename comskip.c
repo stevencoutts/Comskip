@@ -6128,6 +6128,8 @@ void WeighBlocks(void)
      * quiet spot pulls the mean down. Real breaks also change aspect or
      * cut on black more than once. A run just after a real break is left
      * for the tail rule. The opening run is left for the preamble rules.
+     * A run in the end-padding window followed by another show is the
+     * end break and the next programme, and stays commercial.
      */
     for (i = 0; i < block_count; )
     {
@@ -6137,6 +6139,7 @@ void WeighBlocks(void)
         int black_cuts = 0;
         int after_real_break = 0;
         int eof_tail = 0;
+        int end_break = 0;
         double run_len = 0.0;
         double gap = 0.0;
         double vols[MAX_BLOCKS];
@@ -6186,9 +6189,20 @@ void WeighBlocks(void)
             gap += cblock[g].length;
         if (g >= 0 && gap > 0.0 && gap < min_show_segment_length)
             after_real_break = 1;
+        for (k = run_end; k < block_count; k++)
+        {
+            if (cblock[k].score > global_threshold)
+                break;
+            if (cblock[k].length >= min_show_segment_length)
+            {
+                if (cblock[i].f_start >= before_end)
+                    end_break = 1;
+                break;
+            }
+        }
         if (n > 0 && quiet_show_run(vols[n / 2], (double)avg_volume, has_aspect,
                                     seen_show, black_cuts >= 2, after_real_break,
-                                    eof_tail))
+                                    eof_tail, end_break))
         {
             Debug(3, "Quiet run blocks %i-%i (median vol %.0f < %ld) is the show.\n",
                   i, run_end - 1, vols[n / 2], avg_volume);
@@ -8147,6 +8161,74 @@ bool OutputBlocks(void)
                 commercial_count = k;
             deleted = true;
             break;
+        }
+    }
+
+    /*
+     * The end break's first cut can fall after the credits. The credits
+     * are a near-black hold on the tail of the show block. Start the cut
+     * where the picture drops into that hold. A cut already moved off the
+     * block edge stays where the lead-in or credits rule put it.
+     */
+    if (framearray && fps > 0.0 && commercial_count >= 0 && block_count > 1)
+    {
+        int ck = commercial_count;
+        int prevb = commercial[ck].start_block - 1;
+        long edge = cblock[commercial[ck].start_block].f_start;
+        long window = (long)(2.0 * min_commercialbreak * fps);
+        long hold = (long)(2.0 * fps);
+        long scan_from;
+        long frm;
+        long cut = 0;
+        int margin = brightness_jump / 4;
+
+        if (prevb >= 0 &&
+                commercial[ck].end_frame >= cblock[block_count - 1].f_end - 2 &&
+                credits_glued_to_show(commercial[ck].start_frame == edge,
+                                      commercial[ck].start_frame >= before_end,
+                                      cblock[prevb].score <= global_threshold,
+                                      cblock[prevb].brightness,
+                                      (int)avg_brightness,
+                                      cblock[prevb].length,
+                                      min_show_segment_length))
+        {
+            scan_from = commercial[ck].start_frame - window;
+            if (scan_from < cblock[prevb].f_start)
+                scan_from = cblock[prevb].f_start;
+            if (scan_from < before_end)
+                scan_from = before_end;
+            for (frm = scan_from + hold; frm + hold < commercial[ck].start_frame; frm++)
+            {
+                long p;
+                long prev_from = frm - hold;
+                long next_to = frm + hold;
+                long sum = 0;
+                int next_max, prev_avg;
+
+                if (prev_from < 1)
+                    continue;
+                for (p = prev_from; p < frm; p++)
+                    sum += frame[p].brightness;
+                prev_avg = (int)(sum / (frm - prev_from));
+                next_max = frame[frm].brightness;
+                for (p = frm; p < next_to; p++)
+                    if (frame[p].brightness > next_max)
+                        next_max = frame[p].brightness;
+                if (!dim_hold_after_bright(frame[frm].brightness, prev_avg, next_max,
+                                           max_brightness, margin))
+                    continue;
+                cut = frm;
+                break;
+            }
+            if (cut > cblock[prevb].f_start)
+            {
+                Debug(3, "Credits glued to show, cut from frame %li (%.2fs).\n",
+                      cut, get_frame_pts(cut));
+                commercial[ck].start_frame = cut;
+                commercial[ck].start_block = prevb;
+                commercial[ck].length = F2L(commercial[ck].end_frame, cut);
+                deleted = true;
+            }
         }
     }
 
