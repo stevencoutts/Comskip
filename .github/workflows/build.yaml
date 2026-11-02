@@ -19,8 +19,6 @@ jobs:
         - os: macos-latest
           platform: macos
           ffmpeg_version: ffmpeg7
-        - os: windows-latest
-          platform: windows-mingw
     steps:
     - name: Checkout
       uses: actions/checkout@v4
@@ -53,35 +51,8 @@ jobs:
         brew install autoconf automake libtool pkgconf argtable ffmpeg@5 sdl2
         brew link ffmpeg@5
 
-    - name: Setup msys2
-      uses: msys2/setup-msys2@v2
-      if: ${{ matrix.platform == 'windows-mingw' }}
-      with:
-        update: true
-        install: >-
-          mingw-w64-x86_64-gcc
-          mingw-w64-x86_64-make
-          mingw-w64-x86_64-autotools
-          mingw-w64-x86_64-libtool
-          mingw-w64-x86_64-pkg-config
-          mingw-w64-x86_64-yasm
-          mingw-w64-x86_64-argtable
-          mingw-w64-x86_64-ffmpeg
-    - name: Put MSYS2_MinGW64 on PATH
-      if: ${{ matrix.platform == 'windows-mingw' }}
-      run: |
-        echo "${{ runner.temp }}/msys64/mingw64/bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
-
     - name: Configure and build Posix
-      if: ${{ matrix.platform != 'windows-mingw' }}
       run: |
         ./autogen.sh
         ./configure
         make
-
-    - name: Configure and build Windows
-      if: ${{ matrix.platform == 'windows-mingw' }}
-      run: |
-        msys2 -c './autogen.sh'
-        msys2 -c './configure'
-        msys2 -c 'make'
