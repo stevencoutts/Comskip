@@ -60,6 +60,50 @@ int main(void)
     expect_int("ident-disabled", short_show_before_commercial(2.60, 1.00, 1.05, 0.0), 0);
     expect_int("ident-at-limit", short_show_before_commercial(7.0, 1.00, 1.05, 7.0), 0);
 
+    /* A few frames of black is a boundary. Minutes of cuts is the pod. */
+    expect_int("cluster-separator", cut_cluster_is_content(40, 25.0, 125.0), 0);
+    expect_int("cluster-doghouse", cut_cluster_is_content(22, 50.0, 125.0), 0);
+    expect_int("cluster-pod", cut_cluster_is_content(7832, 25.0, 125.0), 1);
+    expect_int("cluster-zero", cut_cluster_is_content(0, 25.0, 125.0), 0);
+
+    /* Stargate's 11s PTS glitch stays negative. A long backwards span uses frames. */
+    expect_near("len-glitch", block_length_seconds(11.16, 565.88, 14430, 14148, 25.0, 125.0),
+                11.16 - 565.88);
+    expect_near("len-jump", block_length_seconds(31.20, 82.52, 26267, 2064, 25.0, 125.0),
+                (26267 - 2064) / 25.0);
+    expect_near("len-positive", block_length_seconds(924.04, 598.00, 48588, 40437, 25.0, 125.0),
+                924.04 - 598.00);
+
+    /* HIGNFY pods sit between longer shows. Stargate/Dog House blocks do not. */
+    expect_int("pod-break2", long_pod_between_shows(326.04, 374.92, 857.64, 125.0, 600.0), 1);
+    expect_int("pod-break3", long_pod_between_shows(272.88, 857.64, 1127.92, 125.0, 600.0), 1);
+    expect_int("show-between-pods", long_pod_between_shows(374.92, 326.04, 857.64, 125.0, 600.0), 0);
+    expect_int("eof-show", long_pod_between_shows(1127.92, 857.64, 0.0, 125.0, 600.0), 0);
+    expect_int("stargate-mid", long_pod_between_shows(264.96, 469.56, 225.92, 125.0, 600.0), 0);
+    expect_int("stargate-eof", long_pod_between_shows(317.76, 225.92, 0.0, 125.0, 600.0), 0);
+    expect_int("stargate-long", long_pod_between_shows(942.44, 550.68, 469.56, 125.0, 600.0), 0);
+    expect_int("doghouse-show", long_pod_between_shows(526.44, 140.26, 39.0, 125.0, 600.0), 0);
+    expect_int("doghouse-eof", long_pod_between_shows(805.78, 168.16, 0.0, 125.0, 600.0), 0);
+    expect_int("over-max-break", long_pod_between_shows(700.0, 800.0, 900.0, 125.0, 600.0), 0);
+
+    /* HIGNFY title card is a 6s letterbox at 2:22. Stargate's first-frame
+     * glitch and its 9:13 ident are not the start of the programme. */
+    expect_int("title-hignfy", opening_title_card(141.80, 6.00, 2.00, 831.0, 1.78, 1.78,
+                                                  4.0, 20.0, 125.0, 250.0, 0.08), 1);
+    expect_int("title-glitch", opening_title_card(0.04, 1.16, 2.72, 552.0, 1.78, 1.78,
+                                                  4.0, 20.0, 125.0, 250.0, 0.08), 0);
+    expect_int("title-midshow", opening_title_card(553.0, 9.96, 2.72, 200.0, 1.78, 1.78,
+                                                   4.0, 20.0, 125.0, 250.0, 0.08), 0);
+    expect_int("title-doghouse", opening_title_card(827.0, 30.0, 2.00, 1277.0, 1.78, 1.78,
+                                                    4.0, 20.0, 125.0, 250.0, 0.08), 0);
+    expect_int("junction", bright_break_after_dim(176, 30, 160, 100), 1);
+    expect_int("junction-flash", bright_break_after_dim(176, 30, 40, 100), 0);
+    expect_int("junction-show", bright_break_after_dim(90, 70, 85, 100), 0);
+
+    expect_near("span-pod", commercial_span_seconds(223.00 - 894.04, 348.40), 348.40);
+    expect_near("span-glitch", commercial_span_seconds(255.68 - 550.72, -295.64), 255.68 - 550.72);
+    expect_near("span-positive", commercial_span_seconds(326.04, 326.04), 326.04);
+
     if (fails) {
         fprintf(stderr, "%d failed\n", fails);
         return 1;

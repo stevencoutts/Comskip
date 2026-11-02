@@ -1696,6 +1696,53 @@ bool BuildBlocks(bool recalc)
         }
         cblock[block_count].cause = cause;
 
+        /*
+         * A minutes-long run of cut markers is the pod, not the black
+         * frames between two blocks. Splitting it in half hides the ads
+         * in the neighbouring head and tail, and a PTS jump in the middle
+         * makes one of those lengths negative. Leave a cluster that already
+         * reaches EOF on the old path so a credits tail is unchanged.
+         */
+        if (b_end != framesprocessed && block_count < MAX_BLOCKS - 2 &&
+                cut_cluster_is_content(b_end - b_start + 1, fps, min_show_segment_length))
+        {
+            Debug(3, "Cut cluster %ld-%ld (%.0fs) is a block, not a boundary.\n",
+                  b_start, b_end, (double)(b_end - b_start + 1) / fps);
+            if (b_start > prev_start)
+            {
+                cblock[block_count].b_head = prev_head;
+                cblock[block_count].f_start = prev_start - prev_head;
+                if (cblock[block_count].f_start < 1)
+                    cblock[block_count].f_start = 1;
+                cblock[block_count].f_end = b_start - 1;
+                cblock[block_count].b_tail = 0;
+                cblock[block_count].bframe_count = cblock[block_count].b_head;
+                cblock[block_count].length = block_length_seconds(
+                    F2T(cblock[block_count].f_end), F2T(cblock[block_count].f_start),
+                    cblock[block_count].f_end, cblock[block_count].f_start,
+                    fps, min_show_segment_length);
+                if (block_count > 0 || cblock[block_count].length > 1.0)
+                {
+                    block_count++;
+                    InitializeBlockArray(block_count);
+                }
+            }
+            cblock[block_count].cause = cause;
+            /* One head frame so the pod is not glued back onto the show. */
+            cblock[block_count].b_head = 1;
+            cblock[block_count].b_tail = 0;
+            cblock[block_count].bframe_count = 1;
+            cblock[block_count].f_start = b_start;
+            cblock[block_count].f_end = b_end;
+            cblock[block_count].length = block_length_seconds(
+                F2T(b_end), F2T(b_start), b_end, b_start, fps, min_show_segment_length);
+            block_count++;
+            InitializeBlockArray(block_count);
+            prev_start = b_end + 1;
+            prev_head = 0;
+            continue;
+        }
+
         //Do it this way for in roundoff problems
         b_counted = (b_end - b_start + 1)/2;
 
@@ -1707,7 +1754,10 @@ bool BuildBlocks(bool recalc)
             cblock[block_count].f_end = b_start + b_counted - 1;
         cblock[block_count].b_tail = b_counted;		//half on the tail of this cblock
         cblock[block_count].bframe_count = cblock[block_count].b_head + cblock[block_count].b_tail;
-        cblock[block_count].length = F2T(cblock[block_count].f_end) - F2T(cblock[block_count].f_start);
+        cblock[block_count].length = block_length_seconds(
+            F2T(cblock[block_count].f_end), F2T(cblock[block_count].f_start),
+            cblock[block_count].f_end, cblock[block_count].f_start,
+            fps, min_show_segment_length);
 
         //If first cblock is < 1 sec. throw it away
         if( block_count > 0 ||
@@ -1745,7 +1795,10 @@ bool BuildBlocks(bool recalc)
 
             cblock[i-1].f_end	= cblock[i].f_end;
             cblock[i-1].b_tail	= cblock[i].b_tail;
-            cblock[i-1].length	= F2L(cblock[i-1].f_end, cblock[i-1].f_start);
+            cblock[i-1].length	= block_length_seconds(
+                F2T(cblock[i-1].f_end), F2T(cblock[i-1].f_start),
+                cblock[i-1].f_end, cblock[i-1].f_start,
+                fps, min_show_segment_length);
             cblock[i-1].cause	= cblock[i].cause;
 
             for (k = i; k < block_count-1; k++)
@@ -6023,6 +6076,49 @@ void WeighBlocks(void)
         		}
         */
     }
+
+    /*
+     * A uniform pod has no black frame and no aspect change between spots,
+     * so it is one block longer than a show segment and the length penalty
+     * scores it as show. It is the block between two longer shows. A
+     * credits-to-EOF block has no following show and is left alone.
+     * Walk left to right so a pod already raised above the threshold is
+     * not later used as a show neighbour.
+     */
+    for (i = 0; i < block_count; i++)
+    {
+        double before_len = 0.0;
+        double after_len = 0.0;
+
+        if (cblock[i].score > global_threshold)
+            continue;
+        for (j = i - 1; j >= 0; j--)
+        {
+            if (cblock[j].score > global_threshold)
+                continue;
+            if (cblock[j].length >= min_show_segment_length)
+            {
+                before_len = cblock[j].length;
+                break;
+            }
+        }
+        for (j = i + 1; j < block_count; j++)
+        {
+            if (cblock[j].score > global_threshold)
+                continue;
+            if (cblock[j].length >= min_show_segment_length)
+            {
+                after_len = cblock[j].length;
+                break;
+            }
+        }
+        if (!long_pod_between_shows(cblock[i].length, before_len, after_len,
+                                    min_show_segment_length, max_commercialbreak))
+            continue;
+        Debug(3, "Block %i of %.2fs is a commercial pod between shows of %.2fs and %.2fs.\n",
+              i, cblock[i].length, before_len, after_len);
+        cblock[i].score = global_threshold + 1.0;
+    }
     /*
 
     	if (!(disable_heuristics & (1 << (1 - 1)))) {
@@ -6993,7 +7089,17 @@ void OutputCommercialBlock(int i, long prev, long start, long end, bool last)
         }
         else
         {
-            fprintf(edl_file, "%.2f\t%.2f\t%d\n", get_frame_pts(s_start), get_frame_pts(s_end), edl_skip_field);
+            double t0 = get_frame_pts(s_start);
+            double t1 = get_frame_pts(s_end);
+
+            /* A backwards PTS jump cannot be one increasing timestamp range.
+             * Frame index / fps is the playback clock on that span. */
+            if (t1 < t0 && fps > 0.0)
+            {
+                t0 = (double)s_start / fps;
+                t1 = (double)s_end / fps;
+            }
+            fprintf(edl_file, "%.2f\t%.2f\t%d\n", t0, t1, edl_skip_field);
         }
     }
     CLOSEOUTFILE(edl_file);
@@ -7419,6 +7525,12 @@ bool OutputBlocks(void)
         // Delete too long/short commercials
         for (k = commercial_count; k >= 0; k--)
         {
+            double pts_len = F2L(commercial[k].end_frame, commercial[k].start_frame);
+            double sum_len = 0.0;
+
+            for (i = commercial[k].start_block; i <= commercial[k].end_block; i++)
+                sum_len += cblock[i].length;
+            commercial[k].length = commercial_span_seconds(pts_len, sum_len);
             if ( (F2T(commercial[k].start_frame) > 1.0   || commercial[k].length < 10.2 /* Sage bug fix */ )
                     &&		// Do not delete too short first or last commercial
                     ((commercial[k].length > max_commercialbreak && k != 0 && k != commercial_count) ||
@@ -7677,6 +7789,115 @@ bool OutputBlocks(void)
         commercial[0].start_block = 0;
         commercial[0].start_frame = cblock[0].f_start;
         commercial[0].length = F2L(commercial[0].end_frame, commercial[0].start_frame);
+    }
+
+    /*
+     * Logo detection is off on some IPTV files, so an aspect change never
+     * becomes a cut. A short letterbox in the opening two show-lengths,
+     * followed by the dominant picture, is the title card. The picture
+     * before it is the previous programme.
+     */
+    if (ar_block_count > 1 && fps > 0.0 && dominant_ar > 0.0)
+    {
+        for (i = 0; i < ar_block_count - 1; i++)
+        {
+            double start_sec = (double)ar_block[i].start / fps;
+            double len = (double)(ar_block[i].end - ar_block[i].start + 1) / fps;
+            double next_len = (double)(ar_block[i + 1].end - ar_block[i + 1].start + 1) / fps;
+            long junk_end;
+
+            if (!opening_title_card(start_sec, len, ar_block[i].ar_ratio,
+                                    next_len, ar_block[i + 1].ar_ratio, dominant_ar,
+                                    min_commercial_size, min_commercialbreak,
+                                    min_show_segment_length,
+                                    2.0 * min_show_segment_length, ar_delta))
+                continue;
+            junk_end = ar_block[i].start - 1;
+            if (junk_end < (long)(min_commercialbreak * fps))
+                break;
+            if (commercial_count >= 0 && commercial[0].start_frame <= junk_end)
+                break;
+            if (commercial_count + 1 >= MAX_COMMERCIALS)
+                break;
+            for (k = commercial_count; k >= 0; k--)
+                commercial[k + 1] = commercial[k];
+            commercial_count++;
+            commercial[0].start_frame = 1;
+            commercial[0].end_frame = junk_end;
+            commercial[0].start_block = 0;
+            commercial[0].end_block = 0;
+            commercial[0].length = F2L(junk_end, 1);
+            Debug(3, "Opening junk through frame %li (%.2fs), title card follows.\n",
+                  junk_end, (double)junk_end / fps);
+            deleted = true;
+            break;
+        }
+    }
+
+    /*
+     * The last block is still the show and runs to EOF: credits, then a
+     * short black, then another programme. Cut from that black to the end.
+     * A file whose last block is already a commercial is left alone.
+     */
+    if (framearray && block_count > 0 && fps > 0.0 && commercial_count + 1 < MAX_COMMERCIALS)
+    {
+        int last = block_count - 1;
+        long scan_from = before_end;
+        long scan_to;
+
+        if (cblock[last].score <= global_threshold &&
+                cblock[last].f_end >= frame_count - 2 &&
+                cblock[last].length > min_show_segment_length &&
+                (commercial_count < 0 || commercial[commercial_count].end_frame < frame_count - (long)fps))
+        {
+            if (scan_from < cblock[last].f_start)
+                scan_from = cblock[last].f_start;
+            scan_to = cblock[last].f_end - (long)(min_commercialbreak * fps);
+            for (k = scan_from + (long)(2.0 * fps); k < scan_to; k++)
+            {
+                long n;
+                long prev_from = k - (long)(2.0 * fps);
+                long next_to = k + (long)(0.5 * fps);
+                long sum = 0;
+                int next_min;
+                int margin = brightness_jump / 2;
+                int prev_avg;
+                long cut;
+                long back;
+
+                if (next_to > cblock[last].f_end)
+                    break;
+                for (n = prev_from; n < k; n++)
+                    sum += frame[n].brightness;
+                prev_avg = (int)(sum / (k - prev_from));
+                next_min = frame[k].brightness;
+                for (n = k; n < next_to; n++)
+                {
+                    if (frame[n].brightness < next_min)
+                        next_min = frame[n].brightness;
+                }
+                if (!bright_break_after_dim(frame[k].brightness, prev_avg, next_min, margin))
+                    continue;
+                /* The step is detected once the card is already bright. The
+                 * frames just before it are the same card, not the credits. */
+                cut = k;
+                back = k - (long)(2.0 * fps);
+                if (back < scan_from)
+                    back = scan_from;
+                while (cut > back && frame[cut - 1].brightness > prev_avg + margin / 2)
+                    cut--;
+                commercial_count++;
+                commercial[commercial_count].start_frame = cut;
+                commercial[commercial_count].end_frame = cblock[last].f_end;
+                commercial[commercial_count].start_block = last;
+                commercial[commercial_count].end_block = last;
+                commercial[commercial_count].length = F2L(cblock[last].f_end, cut);
+                Debug(3, "After credits from frame %li (%.2fs) to EOF.\n",
+                      cut, (double)cut / fps);
+                deleted = true;
+                break;
+            }
+        }
     }
 
 // keep first seconds
